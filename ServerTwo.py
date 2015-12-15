@@ -3,12 +3,13 @@ import socket
 import signal
 import errno
 import pyev
-#import weakref
+import greenlet
+import weakref
 
 NOBLOCKING = (errno.EAGAIN, errno.EWOULDBLOCK)
 STOPSIGNAL = (signal.SIGINT,)
-WORKERCOUNT = 100
-FILEDESC = 'test/test.file'
+WORKERCOUNT = socket.SOMAXCONN
+FILEDESC = '../pyevtest/test.file'
 HTTPHEADER = 'HTTP/1.0 200 OK\r\nContent-Type:text/html\r\n\r\n'
 
 class HttpServer(object):
@@ -18,12 +19,13 @@ class HttpServer(object):
         self.sock = socket.socket()
         self.sock.bind(address)
         self.sock.setblocking(0)
+        self.sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEPORT,1)
         #self.address = self.sock.getsockname()
         self.loop = pyev.default_loop()
         self.watchers = [pyev.Signal(sig, self.loop, self.signal_cb)\
                     for sig in STOPSIGNAL]
         self.watchers.append(pyev.Io(self.sock,pyev.EV_READ,self.loop, self.io_cb))
-        #self.conns = weakref.WeakValueDictionary() 没必要维持长连接
+        #self.conns = weakref.WeakValueDictionary() #没必要维持长连接
 
     def io_cb(self, watcher, revents):
         try:
@@ -36,9 +38,10 @@ class HttpServer(object):
                     else:
                         raise
                 else:
-                    Connection(sock, address, self.loop)
+                    conn = Connection(sock, address, self.loop)
+                    #self.conns[address] = conn
         except Exception as e:
-            print(e)
+            print('error',e)
             self.handle_error('error accepting connnection')
 
     def signal_cb(self, watcher, revents):
@@ -57,6 +60,8 @@ class HttpServer(object):
 
     def start(self):
         self.sock.listen(WORKERCOUNT)
+        #for conn in self.conns.values():
+            #conn.close()
         for watcher in self.watchers:
             watcher.start()
         self.loop.start()
@@ -80,12 +85,12 @@ class Connection(object):
 
     def handle_write(self):
         try:
-            #f = open(FILEDESC,'r')
-            #self.sock.send(HTTPHEADER+f.read())
-            self.sock.send(HTTPHEADER+'OK')
+            body = self.getfile(FILEDESC)
+            self.sock.send(HTTPHEADER+body)
+            #self.sock.send(HTTPHEADER+'OK')
         except socket.error as err:
             if err.args[0] not in NOBLOCKING:
-                raise errno
+                raise err
         else:
             self.close()
 
@@ -96,7 +101,8 @@ class Connection(object):
 
     def handle_read(self):
         try:
-            self.sock.recv(1024)
+            buf = self.sock.recv(1024)
+            #print buf
         except socket.error as err:
             if err.args[0] not in NOBLOCKING:
                 raise errno
@@ -108,9 +114,20 @@ class Connection(object):
         self.watcher.stop()
         self.watcher = None
         
+    def getfile(self,fd):
+        g1 = greenlet.greenlet(self.gr1)
+        body = g1.switch(fd)
+        return body
+
+
+    def gr1(self,fd):
+        f = open(fd,'r')
+        body = f.read()
+        g_self = greenlet.getcurrent()
+        g_self.parent.switch(body)
 
 if __name__ == "__main__":
-    address = ('127.0.0.1',8000)
+    address = ('127.0.0.1',8001)
     server = HttpServer(address)
     server.start()
 
